@@ -11,8 +11,12 @@
 
 #include <stdio.h>
 #include <string.h>
-#include "MvCameraControl.h"
+#include <chrono>
 #include <opencv2/opencv.hpp>
+
+#ifdef HAS_HIK_CAMERA
+#include "MvCameraControl.h"
+#endif
 
 struct CameraFrame {
     cv::Mat frame;
@@ -20,6 +24,7 @@ struct CameraFrame {
 };
 
 namespace hikcamera {
+#ifdef HAS_HIK_CAMERA
     class HikCamera {
     public:
         HikCamera(float exposure_time, float gain);
@@ -41,6 +46,17 @@ namespace hikcamera {
         float exposure_time=5000.0f;
         float gain=10.0f;
     };
+#else
+    class HikCamera {
+    public:
+        HikCamera(float, float) {}
+        ~HikCamera() = default;
+
+        bool openCamera() { return false; }
+        void closeCamera() {}
+        bool grabImage(cv::Mat&) { return false; }
+    };
+#endif
 }
 
 #endif // HIKCAMERA_H
