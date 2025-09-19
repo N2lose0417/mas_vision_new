@@ -21,6 +21,15 @@ auto_aim:
       label_path: ../auto_aim/armor_detector/model/label.txt
       classifier_threshold: 0.7
       ignore_classes: ["negative"]
+    preprocess:
+      adaptive_block_size: 25
+      adaptive_bias: -7.0
+      color_threshold_offset: 12.0
+      morph_kernel_size: 3
+      morph_iterations: 1
+      min_component_area: 45
+      max_component_area_ratio: 0.25
+      color_weight: 0.6
   tracker:
     debug: true
     min_detect_count: 5

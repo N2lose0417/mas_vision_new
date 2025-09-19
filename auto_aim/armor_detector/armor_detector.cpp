@@ -12,8 +12,10 @@
 #include "yaml-cpp/yaml.h"
 #include <fmt/format.h>
 #include <numeric>
+#include <algorithm>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/imgproc.hpp>
 
 namespace auto_aim {
 
@@ -72,6 +74,27 @@ ArmorDetector::ArmorDetector()
                 // 创建数字识别器
                 classifier_ = std::make_unique<NumberClassifier>(model_path, label_path, confidence, ignore_classes);
             }
+
+            if (armor_detector["preprocess"]) {
+                YAML::Node preprocess = armor_detector["preprocess"];
+                adaptive_block_size_ = preprocess["adaptive_block_size"].as<int>(adaptive_block_size_);
+                if (adaptive_block_size_ % 2 == 0) {
+                    adaptive_block_size_ += 1;
+                }
+                adaptive_block_size_ = std::max(3, adaptive_block_size_);
+                adaptive_bias_ = preprocess["adaptive_bias"].as<double>(adaptive_bias_);
+                color_threshold_offset_ = preprocess["color_threshold_offset"].as<double>(color_threshold_offset_);
+                morph_kernel_size_ = preprocess["morph_kernel_size"].as<int>(morph_kernel_size_);
+                morph_kernel_size_ = std::max(1, morph_kernel_size_);
+                morph_iterations_ = preprocess["morph_iterations"].as<int>(morph_iterations_);
+                morph_iterations_ = std::max(0, morph_iterations_);
+                min_component_area_ = preprocess["min_component_area"].as<int>(min_component_area_);
+                min_component_area_ = std::max(0, min_component_area_);
+                max_component_area_ratio_ = preprocess["max_component_area_ratio"].as<double>(max_component_area_ratio_);
+                max_component_area_ratio_ = std::clamp(max_component_area_ratio_, 0.0, 1.0);
+                color_weight_ = preprocess["color_weight"].as<double>(color_weight_);
+                color_weight_ = std::clamp(color_weight_, 0.0, 1.0);
+            }
         }
     } catch (const std::exception& e) {
         ULOG_WARNING_TAG("armor_detector", "Failed to load config, using defaults: %s", e.what());
@@ -80,37 +103,190 @@ ArmorDetector::ArmorDetector()
 
 
 std::vector<Armor> ArmorDetector::ArmorDetect(const cv::Mat & bgr_img)
-{   
-  // 检查输入图像是否有效
-  if (bgr_img.empty() || bgr_img.cols <= 0 || bgr_img.rows <= 0) {
-    ULOG_WARNING_TAG("armor_detector", "Invalid input image");
-    return armors_;
-  }
-  // 转换为灰度图
-  cv::Mat gray;
-  if (bgr_img.channels() == 3) {
-      cv::cvtColor(bgr_img, gray, cv::COLOR_BGR2GRAY);
-  } else {
-      gray = bgr_img;
-  }
-  cv::Mat binary;
-  // 应用阈值进行二值化
-  cv::threshold(gray, binary, threshold_, 255, cv::THRESH_BINARY);
-  // 寻找灯条
-  lights_ = findLights(binary,bgr_img);
-  // 寻找装甲板
-  armors_ = findArmors(lights_,bgr_img);
-  // 对识别出的装甲板中的每个灯条应用角点优化
-  for (auto& armor : armors_) {
-      lightbar_points_corrector(armor.left_light, gray);
-      lightbar_points_corrector(armor.right_light, gray);
-      armor.points.emplace_back(armor.left_light.top);
-      armor.points.emplace_back(armor.right_light.top);
-      armor.points.emplace_back(armor.right_light.bottom);
-      armor.points.emplace_back(armor.left_light.bottom);
-  }
+{
+    lights_.clear();
+    armors_.clear();
 
-  return armors_;
+    // 检查输入图像是否有效
+    if (bgr_img.empty() || bgr_img.cols <= 0 || bgr_img.rows <= 0) {
+        ULOG_WARNING_TAG("armor_detector", "Invalid input image");
+        return armors_;
+    }
+
+    last_color_mask_.release();
+    last_intensity_mask_.release();
+    last_binary_mask_.release();
+
+    cv::Mat color_mask = createColorMask(bgr_img);
+    cv::Mat intensity_mask = createIntensityMask(bgr_img);
+
+    double weight = std::clamp(color_weight_, 0.0, 1.0);
+    cv::Mat combined_mask;
+    if (!color_mask.empty() && !intensity_mask.empty()) {
+        cv::Mat color_float, intensity_float, fusion;
+        color_mask.convertTo(color_float, CV_32F, 1.0 / 255.0);
+        intensity_mask.convertTo(intensity_float, CV_32F, 1.0 / 255.0);
+        cv::addWeighted(color_float, weight, intensity_float, 1.0 - weight, 0.0, fusion);
+        cv::threshold(fusion, combined_mask, 0.5, 1.0, cv::THRESH_BINARY);
+        combined_mask.convertTo(combined_mask, CV_8U, 255.0);
+    } else if (!color_mask.empty()) {
+        combined_mask = color_mask.clone();
+    } else if (!intensity_mask.empty()) {
+        combined_mask = intensity_mask.clone();
+    } else {
+        combined_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
+    }
+
+    cv::Mat binary = refineBinaryMask(combined_mask);
+
+    last_color_mask_ = color_mask;
+    last_intensity_mask_ = intensity_mask;
+    last_binary_mask_ = binary.clone();
+
+    // 寻找灯条
+    lights_ = findLights(binary, bgr_img);
+    // 寻找装甲板
+    armors_ = findArmors(lights_, bgr_img);
+
+    // 转换为灰度图用于角点优化
+    cv::Mat gray;
+    if (bgr_img.channels() == 3) {
+        cv::cvtColor(bgr_img, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        gray = bgr_img.clone();
+    }
+
+    // 对识别出的装甲板中的每个灯条应用角点优化
+    for (auto& armor : armors_) {
+        lightbar_points_corrector(armor.left_light, gray);
+        lightbar_points_corrector(armor.right_light, gray);
+        armor.points.emplace_back(armor.left_light.top);
+        armor.points.emplace_back(armor.right_light.top);
+        armor.points.emplace_back(armor.right_light.bottom);
+        armor.points.emplace_back(armor.left_light.bottom);
+    }
+
+    return armors_;
+}
+
+cv::Mat ArmorDetector::createColorMask(const cv::Mat& bgr_img) const
+{
+    if (bgr_img.empty()) {
+        return cv::Mat();
+    }
+
+    cv::Mat channels[3];
+    if (bgr_img.channels() == 3) {
+        cv::split(bgr_img, channels);
+    } else {
+        cv::Mat converted;
+        cv::cvtColor(bgr_img, converted, cv::COLOR_GRAY2BGR);
+        cv::split(converted, channels);
+    }
+
+    cv::Mat color_diff;
+    switch (detect_color_) {
+        case EnemyColor::RED:
+            cv::subtract(channels[2], channels[0], color_diff);
+            break;
+        case EnemyColor::BLUE:
+            cv::subtract(channels[0], channels[2], color_diff);
+            break;
+        default:
+            cv::absdiff(channels[2], channels[0], color_diff);
+            break;
+    }
+
+    cv::GaussianBlur(color_diff, color_diff, cv::Size(5, 5), 0);
+
+    cv::Scalar mean_val, stddev_val;
+    cv::meanStdDev(color_diff, mean_val, stddev_val);
+    double threshold_value = mean_val[0] + color_threshold_offset_ + 0.5 * stddev_val[0];
+    threshold_value = std::clamp(threshold_value, 5.0, 255.0);
+
+    cv::Mat color_mask;
+    cv::threshold(color_diff, color_mask, threshold_value, 255, cv::THRESH_BINARY);
+
+    return color_mask;
+}
+
+cv::Mat ArmorDetector::createIntensityMask(const cv::Mat& bgr_img) const
+{
+    if (bgr_img.empty()) {
+        return cv::Mat();
+    }
+
+    cv::Mat gray;
+    if (bgr_img.channels() == 3) {
+        cv::cvtColor(bgr_img, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        gray = bgr_img.clone();
+    }
+
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
+    cv::Mat clahe_img;
+    clahe->apply(gray, clahe_img);
+
+    cv::Mat blurred;
+    cv::GaussianBlur(clahe_img, blurred, cv::Size(3, 3), 0);
+
+    int block_size = adaptive_block_size_;
+    if (block_size % 2 == 0) {
+        block_size += 1;
+    }
+    block_size = std::max(3, block_size);
+
+    cv::Mat adaptive;
+    cv::adaptiveThreshold(blurred, adaptive, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                          cv::THRESH_BINARY, block_size, adaptive_bias_);
+
+    return adaptive;
+}
+
+cv::Mat ArmorDetector::refineBinaryMask(const cv::Mat& binary) const
+{
+    if (binary.empty()) {
+        return binary;
+    }
+
+    cv::Mat refined;
+    if (binary.type() != CV_8U) {
+        binary.convertTo(refined, CV_8U);
+    } else {
+        refined = binary.clone();
+    }
+
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT,
+                                               cv::Size(std::max(1, morph_kernel_size_), std::max(1, morph_kernel_size_)));
+    if (morph_iterations_ > 0) {
+        cv::morphologyEx(refined, refined, cv::MORPH_CLOSE, kernel, cv::Point(-1, -1), morph_iterations_);
+    }
+    cv::Mat vertical_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, 3));
+    cv::morphologyEx(refined, refined, cv::MORPH_OPEN, vertical_kernel);
+
+    if (min_component_area_ > 0) {
+        cv::Mat labels, stats, centroids;
+        int num_components = cv::connectedComponentsWithStats(refined, labels, stats, centroids, 8, CV_32S);
+        cv::Mat mask = cv::Mat::zeros(refined.size(), CV_8U);
+        int max_area = 0;
+        if (max_component_area_ratio_ > 0.0) {
+            max_area = static_cast<int>(refined.total() * max_component_area_ratio_);
+        }
+
+        for (int i = 1; i < num_components; ++i) {
+            int area = stats.at<int>(i, cv::CC_STAT_AREA);
+            if (area < min_component_area_) {
+                continue;
+            }
+            if (max_area > 0 && area > max_area) {
+                continue;
+            }
+            mask.setTo(255, labels == i);
+        }
+        refined = mask;
+    }
+
+    return refined;
 }
 
 void ArmorDetector::lightbar_points_corrector(LightBar & lightbar, const cv::Mat & gray_img) const
@@ -476,18 +652,23 @@ std::map<std::string, cv::Mat> ArmorDetector::showResult(const cv::Mat& bgr_img)
             return result_map;
         }
 
-        // 显示二值化图像（尺寸为原图的一半）
-        cv::Mat gray_img;
-        if (bgr_img.channels() == 3) {
-            cv::cvtColor(bgr_img, gray_img, cv::COLOR_BGR2GRAY);
-        } else {
-            gray_img = bgr_img;
+        if (!last_binary_mask_.empty()) {
+            cv::Mat resized_binary;
+            cv::resize(last_binary_mask_, resized_binary, cv::Size(bgr_img.cols/2, bgr_img.rows/2));
+            result_map["binary_image"] = resized_binary;
         }
-        cv::Mat binary_img;
-        cv::threshold(gray_img, binary_img, threshold_, 255, cv::THRESH_BINARY);
-        cv::Mat resized_binary;
-        cv::resize(binary_img, resized_binary, cv::Size(bgr_img.cols/2, bgr_img.rows/2));
-        result_map["binary_image"] = resized_binary;
+
+        if (!last_color_mask_.empty()) {
+            cv::Mat resized_color_mask;
+            cv::resize(last_color_mask_, resized_color_mask, cv::Size(bgr_img.cols/2, bgr_img.rows/2));
+            result_map["color_mask"] = resized_color_mask;
+        }
+
+        if (!last_intensity_mask_.empty()) {
+            cv::Mat resized_intensity_mask;
+            cv::resize(last_intensity_mask_, resized_intensity_mask, cv::Size(bgr_img.cols/2, bgr_img.rows/2));
+            result_map["intensity_mask"] = resized_intensity_mask;
+        }
 
         // 显示结果图像（包含装甲板和角点，尺寸为原图的一半）
         cv::Mat result_img = bgr_img.clone();

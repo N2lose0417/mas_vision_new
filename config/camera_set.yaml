@@ -1,6 +1,25 @@
 camera:
   exposuretime: 4000.0
   gain: 10.0
+webcam:
+  device_index: 0
+  width: 1280
+  height: 720
+  fps: 60.0
+  auto_exposure: true
+  exposure: -5.0
+  gain: 0.0
+  auto_white_balance: true
+  white_balance: 4600.0
+  auto_focus: true
+  focus: 0.0
+  auto_saturation: true
+  saturation: 64.0
+  warmup_frames: 10
+  drop_initial_frames: true
+  rotate: none
+  flip: none
+  backend: auto
 calibration:
   board_width: 7
   board_height: 10
@@ -20,7 +39,7 @@ display: true
 record:
   enabled: false
   fps: 30.0
-mode: video  # camera or video
+mode: webcam  # webcam, camera or video
 video:
   path: test3.mp4
   fps: 120.0

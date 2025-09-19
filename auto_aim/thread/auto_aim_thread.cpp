@@ -89,6 +89,18 @@ void autoAimThreadFunc() {
                         udpClient->sendImage(binary,"binary");
                     }
                 }
+                if (detector_map.find("color_mask") != detector_map.end()) {
+                    cv::Mat& color_mask = detector_map["color_mask"];
+                    if (udpClient && udpClient->isInitialized()) {
+                        udpClient->sendImage(color_mask,"color_mask");
+                    }
+                }
+                if (detector_map.find("intensity_mask") != detector_map.end()) {
+                    cv::Mat& intensity_mask = detector_map["intensity_mask"];
+                    if (udpClient && udpClient->isInitialized()) {
+                        udpClient->sendImage(intensity_mask,"intensity_mask");
+                    }
+                }
                 if (detector_map.find("armor_detector") != detector_map.end()) {
                     cv::Mat& armor_detector_result = detector_map["armor_detector"];
                     auto_aim_info.drawInfo(armor_detector_result, "detector");

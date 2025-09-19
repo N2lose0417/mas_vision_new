@@ -70,6 +70,24 @@ class ArmorDetector
     ArmorType isArmor(const LightBar & light_1, const LightBar & light_2) const;
     bool containLight(const LightBar & light_1, const LightBar & light_2, const std::vector<LightBar> & lights) const;
     cv::Mat getAllNumbersImage() const ;
+    cv::Mat createColorMask(const cv::Mat& bgr_img) const;
+    cv::Mat createIntensityMask(const cv::Mat& bgr_img) const;
+    cv::Mat refineBinaryMask(const cv::Mat& binary) const;
+
+    // 预处理参数
+    int adaptive_block_size_ = 25;
+    double adaptive_bias_ = -7.0;
+    double color_threshold_offset_ = 12.0;
+    int morph_kernel_size_ = 3;
+    int morph_iterations_ = 1;
+    int min_component_area_ = 45;
+    double max_component_area_ratio_ = 0.25;
+    double color_weight_ = 0.6;
+
+    // 调试缓存
+    cv::Mat last_color_mask_;
+    cv::Mat last_intensity_mask_;
+    cv::Mat last_binary_mask_;
 };
 
 }
